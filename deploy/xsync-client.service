@@ -1,0 +1,22 @@
+[Unit]
+Description=xsync download client
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xsync
+Group=xsync
+ExecStart=/usr/local/bin/xsync-client --client-config /etc/xsync-client/account.yaml --dist /srv/incoming
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/xsync-client
+ReadWritePaths=/srv/incoming
+
+[Install]
+WantedBy=multi-user.target

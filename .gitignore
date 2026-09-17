@@ -1,0 +1,4 @@
+/xsync-client
+/dist/
+*.test
+*.prof
