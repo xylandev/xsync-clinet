@@ -74,7 +74,7 @@ security:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Endpoint != "https://203.0.113.10:9443" || cfg.APIKey != "download-secret" || cfg.Destination != "/srv/incoming" || cfg.ClientID != "xsync-client-customer-a" || !strings.Contains(cfg.CACertificate, "BEGIN CERTIFICATE") {
+	if cfg.Endpoint != "https://203.0.113.10:9443" || cfg.APIKey != "download-secret" || cfg.Destination != "/srv/incoming" || !strings.HasPrefix(cfg.ClientID, "xsync-client-customer-a") || !strings.Contains(cfg.CACertificate, "BEGIN CERTIFICATE") {
 		t.Fatalf("unexpected runtime config: %+v", cfg)
 	}
 }

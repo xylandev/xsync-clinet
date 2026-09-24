@@ -26,7 +26,29 @@ type Config struct {
 	LeaseTTL       time.Duration `yaml:"lease_ttl"`
 	PollInterval   time.Duration `yaml:"poll_interval"`
 	ReserveBytes   uint64        `yaml:"reserve_bytes"`
+	// Conflict decides what happens when the destination already holds a
+	// different file that this client did not deliver: "backup" moves it to
+	// .xsync/conflicts/ first (default), "overwrite" replaces it, "skip" hands
+	// the object back to the server, which parks it for an operator.
+	Conflict string `yaml:"conflict"`
+	// FileMode and DirMode apply to delivered files and created directories.
+	FileMode os.FileMode `yaml:"file_mode"`
+	DirMode  os.FileMode `yaml:"dir_mode"`
+	// MaxBatch is how many objects one claim request may return.
+	MaxBatch int `yaml:"max_batch"`
+	// LongPoll is how long an empty claim waits on the server for new work.
+	LongPoll time.Duration `yaml:"long_poll"`
+	// RequestTimeout bounds control requests (claim, renew, commit, release).
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// PartialTTL is how long an abandoned partial download is kept.
+	PartialTTL time.Duration `yaml:"partial_ttl"`
 }
+
+const (
+	ConflictBackup    = "backup"
+	ConflictOverwrite = "overwrite"
+	ConflictSkip      = "skip"
+)
 
 type fileConfig struct {
 	Endpoint       string        `yaml:"endpoint"`
@@ -43,6 +65,7 @@ type fileConfig struct {
 	LeaseTTL       time.Duration `yaml:"lease_ttl,omitempty"`
 	PollInterval   time.Duration `yaml:"poll_interval,omitempty"`
 	ReserveBytes   uint64        `yaml:"reserve_bytes,omitempty"`
+	Conflict       string        `yaml:"conflict,omitempty"`
 }
 
 type ConnectionBundle struct {
@@ -90,7 +113,12 @@ type BundleSecurity struct {
 }
 
 func Default() Config {
-	return Config{Endpoint: "https://127.0.0.1:9443", Destination: "./downloads", ClientID: "xsync-client", Concurrency: 8, BufferSize: 1 << 20, LeaseTTL: 2 * time.Minute, PollInterval: 3 * time.Second, ReserveBytes: 1 << 30}
+	return Config{
+		Endpoint: "https://127.0.0.1:9443", Destination: "./downloads", ClientID: "xsync-client",
+		Concurrency: 8, BufferSize: 1 << 20, LeaseTTL: 2 * time.Minute, PollInterval: 3 * time.Second,
+		ReserveBytes: 1 << 30, Conflict: ConflictBackup, FileMode: 0o640, DirMode: 0o750,
+		MaxBatch: 8, LongPoll: 20 * time.Second, RequestTimeout: 30 * time.Second, PartialTTL: 7 * 24 * time.Hour,
+	}
 }
 func Load(name string) (Config, error) {
 	c := Default()
@@ -134,6 +162,9 @@ func Write(name string, c Config) error {
 	if c.ReserveBytes != defaults.ReserveBytes {
 		out.ReserveBytes = c.ReserveBytes
 	}
+	if c.Conflict != defaults.Conflict {
+		out.Conflict = c.Conflict
+	}
 	raw, err := yaml.Marshal(out)
 	if err != nil {
 		return err
@@ -166,8 +197,25 @@ func (c Config) Validate() error {
 	if c.BufferSize < 64<<10 || c.BufferSize > 16<<20 {
 		return errors.New("buffer_size must be between 64 KiB and 16 MiB")
 	}
-	if c.LeaseTTL < 30*time.Second {
-		return errors.New("lease_ttl must be at least 30s")
+	if c.LeaseTTL < 30*time.Second || c.LeaseTTL > time.Hour {
+		return errors.New("lease_ttl must be between 30s and 1h (the server caps leases at its max_lease)")
+	}
+	if c.PollInterval < 100*time.Millisecond {
+		return errors.New("poll_interval must be at least 100ms")
+	}
+	switch c.Conflict {
+	case ConflictBackup, ConflictOverwrite, ConflictSkip:
+	default:
+		return fmt.Errorf("conflict must be %q, %q or %q", ConflictBackup, ConflictOverwrite, ConflictSkip)
+	}
+	if c.FileMode&^0o777 != 0 || c.DirMode&^0o777 != 0 || c.FileMode&0o600 != 0o600 || c.DirMode&0o700 != 0o700 {
+		return errors.New("file_mode and dir_mode must be permission bits that keep owner read/write access")
+	}
+	if c.MaxBatch < 1 || c.MaxBatch > 256 {
+		return errors.New("max_batch must be between 1 and 256")
+	}
+	if c.LongPoll < 0 || c.LongPoll > 5*time.Minute || c.RequestTimeout < time.Second {
+		return errors.New("long_poll must be 0-5m and request_timeout at least 1s")
 	}
 	return nil
 }
@@ -196,7 +244,12 @@ func LoadBundle(name, destination string) (Config, error) {
 	c.CACertificate = bundle.Security.TLSCAPEM
 	c.TLSFingerprint = bundle.Security.TLSCertificateFingerprint
 	c.Destination = destination
+	// Several machines may use the same bundle; the host name keeps their
+	// leases apart in server logs.
 	c.ClientID = "xsync-client-" + bundle.Account
+	if host, err := os.Hostname(); err == nil && host != "" {
+		c.ClientID += "@" + host
+	}
 	if err = c.Validate(); err != nil {
 		return c, err
 	}

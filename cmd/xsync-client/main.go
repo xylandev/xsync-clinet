@@ -35,6 +35,8 @@ func main() {
 			err = validateCommand(os.Args[2:])
 		case "run":
 			err = runCommand(os.Args[2:])
+		case "parked", "requeue", "drop":
+			err = parkedCommand(os.Args[1], os.Args[2:])
 		case "version":
 			fmt.Printf("xsync-client %s (commit %s, built %s)\n", version, commit, buildDate)
 		default:
@@ -50,6 +52,8 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: xsync-client --client-config <account.yaml> --dist <directory>")
 	fmt.Fprintln(os.Stderr, "       xsync-client <init|validate-config|run|version> [options]")
+	fmt.Fprintln(os.Stderr, "       xsync-client parked --client-config <account.yaml>")
+	fmt.Fprintln(os.Stderr, "       xsync-client <requeue|drop> --client-config <account.yaml> --id <object>")
 }
 func configFlag(name string, args []string) (string, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -76,6 +80,7 @@ func runCommand(args []string) error {
 	bundlePath := fs.String("client-config", "", "server-generated account connection bundle")
 	destination := fs.String("dist", "", "destination directory")
 	prefix := fs.String("prefix", "", "optional remote path prefix")
+	conflict := fs.String("conflict", "", "when the destination holds a different file: backup (default), overwrite or skip")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -100,6 +105,9 @@ func runCommand(args []string) error {
 	}
 	if *prefix != "" {
 		cfg.Prefix = *prefix
+	}
+	if *conflict != "" {
+		cfg.Conflict = *conflict
 	}
 	if err = cfg.Validate(); err != nil {
 		return err
@@ -129,4 +137,53 @@ func initCommand(args []string) error {
 	cfg.CAFile = *ca
 	cfg.Destination = *dest
 	return config.Write(*p, cfg)
+}
+
+// parkedCommand lists, requeues or drops objects the server parked after
+// repeated or permanent delivery failures.
+func parkedCommand(name string, args []string) error {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	bundlePath := fs.String("client-config", "", "server-generated account connection bundle")
+	legacy := fs.String("config", "", "legacy downloader configuration file")
+	id := fs.String("id", "", "object ID")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var cfg config.Config
+	var err error
+	switch {
+	case *bundlePath != "":
+		cfg, err = config.LoadBundle(*bundlePath, os.TempDir())
+	case *legacy != "":
+		cfg, err = config.Load(*legacy)
+	default:
+		return fmt.Errorf("--client-config or --config is required")
+	}
+	if err != nil {
+		return err
+	}
+	client, err := syncer.New(cfg, nil)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	switch name {
+	case "parked":
+		out, err := client.ListParked(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(out)
+		return nil
+	case "requeue":
+		if *id == "" {
+			return fmt.Errorf("--id is required")
+		}
+		return client.RequeueParked(ctx, *id)
+	default:
+		if *id == "" {
+			return fmt.Errorf("--id is required")
+		}
+		return client.DropParked(ctx, *id)
+	}
 }

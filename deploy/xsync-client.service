@@ -10,6 +10,10 @@ Group=xsync
 ExecStart=/usr/local/bin/xsync-client --client-config /etc/xsync-client/account.yaml --dist /srv/incoming
 Restart=on-failure
 RestartSec=3s
+# SIGTERM hands every lease back to the server without counting a failed
+# delivery; give in-flight requests time to finish.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
 LimitNOFILE=1048576
 NoNewPrivileges=true
 PrivateTmp=true
